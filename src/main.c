@@ -28,6 +28,8 @@ static size_t scanned_code_len;     //Length of scanned QR string
 
 extern CANMessage_t motorStatus;
 extern uint8_t masterCommand;
+extern setpointRPM;
+extern velocityActual;
 
 
 typedef enum
@@ -41,6 +43,13 @@ typedef enum
 
 stationState_t currentState;
 bool active;
+uint32_t petalRampCounter;
+uint16_t currentMotorRPM;
+uint8_t rampSteps;
+bool nextRamp;
+uint16_t maxRPM;
+uint8_t minRPM;
+bool slowStop;
 
 //NEW
 #ifndef bool
@@ -58,6 +67,12 @@ RUN_BEFORE(INIT_END)        //Is this framework?
     //UART Scanner Config
     uartStart(&UARTD1, &uart1conf);     //Start UART Driver 1, point to configuration                                                                                                                          
     worker_thread_add_timer_task(&publish_thread, &my_task, my_task_func, NULL, LL_MS2ST(10), true);
+    maxRPM = 300;
+    minRPM = 20;
+    petalRampCounter = 0;
+    currentMotorRPM = 10;
+    active = 0;
+    slowStop = false;
 }
 
 static void my_task_func(struct worker_thread_timer_task_s* task) 
@@ -97,66 +112,60 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
         chSysUnlock();
     }
     
-    if(masterCommand)
-    {
-        CANMessage_t rebound;
-        rebound.sid = 0x10;
-        rebound.ide = 0;
-        rebound.rtr = 0;
-        rebound.dlc = 8;
-        rebound.data[0] = masterCommand;
-        
-        for(uint8_t i = 7; i > 0; i--)
-        {
-            rebound.data[i] = i;
-        }
-        CAN_transmit(rebound);
-        
-    }
-    
+    //Process Station State (if available)
     switch (masterCommand)
     {
         case 0x02:
             currentState = opening;
             if(!active)
             {
-                /*uint8_t data[4];
-                data[0] = 0x02;
-                data[1] = 0;
+                uint8_t data[4];
                 data[2] = 0;
                 data[3] = 0;
-                SDO_writeObject(0x03, 0x2400, 0x01, 4, data);*/
+                data[0] = 0x90;//64
+                data[1] = 0x01;//0
+                SDO_writeObject(0x03, 0x6071, 0x00, 2, data);     //Set target torque to 10% (this will increase to 40% when action is called)
+                chThdSleepMilliseconds(3);
+                data[0] = 0xF4;//F4
+                data[1] = 0x01;//01
+                SDO_writeObject(0x03, 0x6072, 0x00, 2, data);     //Set max torque to 50%
+                data[1] = 0x00;
+                chThdSleepMilliseconds(3);
                 PD4C_stateMachine(0x03);
                 active = 1;
             }
+            palClearLine(BOARD_PAL_LINE_PIN3);
             break;
             
         case 0x03:
             currentState = closing;
             if(!active)
             {
-                /*uint8_t data[4];
-                data[0] = 0x03;
-                data[1] = 0;
+                uint8_t data[4];
                 data[2] = 0;
                 data[3] = 0;
-                SDO_writeObject(0x03, 0x2400, 0x01, 4, data);*/
+                data[0] = 0x9C;//9C
+                data[1] = 0xFE;//FF
+                SDO_writeObject(0x03, 0x6071, 0x00, 2, data);     //Set target torque to 10% (this will increase to 40% when action is called)
+                chThdSleepMilliseconds(3);
+                data[0] = 0x0C;
+                data[1] = 0xFE;
+                SDO_writeObject(0x03, 0x6072, 0x00, 2, data);     //Set max torque to 50%
+                data[1] = 0x00;
+                chThdSleepMilliseconds(3);
                 PD4C_stateMachine(0x03);
                 active = 1;
             }
+            palSetLine(BOARD_PAL_LINE_PIN3);
             break;
             
         case 0x01:
             currentState = closed;
+            slowStop = false;
+            currentMotorRPM = 10;
             if(active)
-            {
-                /*uint8_t data[4];
-                data[0] = 0x01;
-                data[1] = 0;
-                data[2] = 0;
-                data[3] = 0;
-                SDO_writeObject(0x03, 0x2400, 0x01, 4, data);*/
-                PD4C_stateMachine(0x03);
+            {  
+                stopMotor(0x03);
                 active = 0;
             }
             break;
@@ -164,13 +173,36 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
         case 0x04:
             PD4C_setup(0x03);
             break;
+            
+        case 0x05:
+            setMotorRPM(0x03, setpointRPM);
+            maxRPM = setpointRPM;
+            break;
+            
+        case 0x06:
+            slowStop = true;
+            break;
         
         default:
             break;
     }
-    masterCommand = 0;
-       
-       
+    masterCommand = 0;  //Reset masterCommand
+    
+    
+    if(active && (currentMotorRPM < maxRPM) && !slowStop)
+    {
+        currentMotorRPM++; //= currentMotorRPM + 10;
+        setMotorRPM(0x03, currentMotorRPM);
+        petalRampCounter = millis();
+    }
+    else if(active && (currentMotorRPM > minRPM) && slowStop)
+    {
+        currentMotorRPM--;
+        setMotorRPM(0x03, currentMotorRPM);
+        petalRampCounter = millis();
+    }
+    
+    
        
     if(currentState == closed)
     {
@@ -184,10 +216,19 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
     }
     
     
-            
-    //palSetLine(BOARD_PAL_LINE_PIN10);
-    //palClearLine(BOARD_PAL_LINE_PIN3);
+    if(active && slowStop)
+    {
+        SDO_readObject(0x03, 0x6044, 0x00);
+        chThdSleepMilliseconds(3);
+        if(velocityActual ==0)
+        {
+            stopMotor(0x03);
+            active = 0;
+            currentState = closed;
+            slowStop = false;
+        }
 
+    }
     
     /*
     //Toggle Beacon 
@@ -201,43 +242,8 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
         beaconOn = !beaconOn;
         palClearLine(BOARD_PAL_LINE_PIN3);
     }
-    
-    //Change LEDs
-    if(!redLED)
-    {
-        redLED = !redLED;
-        palSetLine(BOARD_PAL_LINE_PIN10);
-        palClearLine(BOARD_PAL_LINE_PIN9);
-    }
-    else
-    {
-        redLED = !redLED;
-        palSetLine(BOARD_PAL_LINE_PIN9);
-        palClearLine(BOARD_PAL_LINE_PIN10);
-    }
-    */
-    
 
-    
-    //START
-    /*
-    SDO_readObject(0x03, 0x6041, 0x00);
-    chThdSleepMilliseconds(5);
-    uint32_t msgSID = motorStatus.sid;
-    uint8_t exData[4];
-    exData[0] = motorStatus.data[4];
-    exData[1] = motorStatus.data[5];
-    exData[2] = motorStatus.data[6];
-    exData[3] = motorStatus.data[7];
-    SDO_writeObject(0x00, msgSID, motorStatus.data[0], 4, exData);*/
-    
-    //PD4C_setup(0x03);
-    //PD4C_openPetal(0x03);
-    //chThdSleepMilliseconds(100);
-    //PD4C_stateMachine(0x03);
-    //SDO_readObject(0x03, 0x6041, 0x00); 
-    
-    //Check Station State
+    */
 }
 
 //Serial Event
@@ -250,6 +256,27 @@ static void uart_char_recv(UARTDriver* uartp, uint16_t c)       //Called when ch
         scanned_code[scanned_code_len++] = c;   //Add character to array
         palToggleLine(BOARD_PAL_LINE_LED1);     //Toggle LED line
     }
+}
+
+void stopMotor(uint8_t nodeID)
+{
+    uint8_t data[4];    //Declare 4-byte data array to be populated for each object
+    data[0] = 0;
+    data[1] = 0;
+    data[2] = 0;
+    data[3] = 0;
+    SDO_writeObject(0x03, 0x6040, 0x00, 2, data);
+}
+
+
+void setMotorRPM(uint8_t nodeID, uint16_t rpm)
+{
+    uint8_t data[4];
+    data[0] = (rpm & 0x00FF);
+    data[1] = (rpm >> 8);
+    data[2] = 0;
+    data[3] = 0;
+    SDO_writeObject(nodeID, 0x2032, 0x00, 4, data);
 }
 
 
@@ -285,16 +312,17 @@ void PD4C_setup(uint8_t nodeID)
     SDO_writeObject(nodeID, 0x6072, 0x00, 2, data);     //Set max torque to 50%
     data[1] = 0x00;
     chThdSleepMilliseconds(3);
-    data[0] = 100;
-    SDO_writeObject(nodeID, 0x6087, 0x00, 4, data);     //Set torque slop rise to 10%/sec
+    data[0] = 0xF4;
+    data[1] = 0x01;
+    SDO_writeObject(nodeID, 0x6087, 0x00, 4, data);     //Set torque slop rise to 50%/sec
     chThdSleepMilliseconds(3);
     data[0] = 1;
     SDO_writeObject(nodeID, 0x3202, 0x00, 4, data);     //Set to Closed-Loop mode (0x21 no max velocity)
     chThdSleepMilliseconds(3);
     
-    data[0] = 0x2C;
-    data[1] = 0x01;
-    SDO_writeObject(nodeID, 0x2032, 0x00, 4, data);     //0x12C - 300rpm (this is subject to ramp up/down)
+    data[0] = 0x0A;
+    data[1] = 0x00;
+    SDO_writeObject(nodeID, 0x2032, 0x00, 4, data);     //10 rpm init -- 0x12C - 300rpm (this is subject to ramp up/down)
     chThdSleepMilliseconds(3);
     
     //Velocity Dimensions

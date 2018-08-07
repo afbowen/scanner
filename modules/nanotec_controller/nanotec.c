@@ -21,6 +21,8 @@ static struct worker_thread_listener_task_s rx_listener_task;
 static void nanotec_can_rx_handler(size_t msg_size, const void* buf, void* ctx);
 CANMessage_t motorStatus;
 uint8_t masterCommand;
+uint16_t setpointRPM;
+int16_t velocityActual;
 
 RUN_BEFORE(INIT_END) {
     struct can_instance_s* can = can_get_instance(0);
@@ -37,6 +39,10 @@ static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx)
     if((frame->content.IDE == 0) && ((frame->content.SID == 0x30)))
     {
         masterCommand = frame->content.data[0];
+        if(masterCommand == 0x05)
+        {
+            setpointRPM = ((frame->content.data[2] << 8) | (frame->content.data[1]));
+        }
         CANMessage_t rebound;
         rebound.sid = 0x40;
         rebound.ide = 0;
@@ -52,6 +58,7 @@ static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx)
     }
     
     //Check if it's a CANopen frame
+    
     else if((frame->content.IDE == 0) && (((frame->content.SID >> 4) & 0xF8) == 0x58))   //If not extended ID and function code is 0x58, this is CANopen message
     {
         CANopenMessage_t msgInCANopen;
@@ -66,6 +73,14 @@ static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx)
         {
             msgInCANopen.data[i] = frame->content.data[i];
         }
+        
+        if(msgInCANopen.data[1] == 0x44)
+        {
+            velocityActual = ((msgInCANopen.data[5] << 8) | msgInCANopen.data[4]);
+            msgInCANopen.data[6] = (velocityActual >> 8);
+            msgInCANopen.data[7] = (velocityActual & 0xFF);
+        }
+            
         //DEBUG
         CANopenTransmit(msgInCANopen);
         
