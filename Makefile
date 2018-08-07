@@ -1,6 +1,8 @@
 CSRC = $(shell find src -name "*.c")
 INCDIR = ./include
 
+MODULE_SEARCH_DIRS = modules
+
 MODULES_ENABLED = \
 chibios_sys_init \
 chibios_hal_init \
@@ -20,7 +22,8 @@ uavcan_beginfirmwareupdate_server \
 uavcan_allocatee \
 uavcan_restart \
 uavcan_debug \
-freemem_check
+freemem_check \
+nanotec_controller
 
 MESSAGES_ENABLED = \
 uavcan.protocol.debug.LogMessage \
