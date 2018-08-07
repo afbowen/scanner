@@ -35,7 +35,8 @@ typedef enum
     closed  = 0,
     opening = 1,
     open    = 2,
-    closing  = 3
+    closing = 3,
+    setup   = 4
 }   stationState_t;
 
 stationState_t currentState;
@@ -96,49 +97,78 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
         chSysUnlock();
     }
     
+    if(masterCommand)
+    {
+        CANMessage_t rebound;
+        rebound.sid = 0x10;
+        rebound.ide = 0;
+        rebound.rtr = 0;
+        rebound.dlc = 8;
+        rebound.data[0] = masterCommand;
+        
+        for(uint8_t i = 7; i > 0; i--)
+        {
+            rebound.data[i] = i;
+        }
+        CAN_transmit(rebound);
+        
+    }
     
-    if(masterCommand == 0x02)
+    switch (masterCommand)
     {
-        currentState = opening;
-        if(!active)
-        {
-            uint8_t data[4];
-            data[0] = 0x02;
-            data[1] = 0;
-            data[2] = 0;
-            data[3] = 0;
-            SDO_writeObject(0x03, 0x2400, 0x01, 4, data);
-            active = 1;
-        }
+        case 0x02:
+            currentState = opening;
+            if(!active)
+            {
+                /*uint8_t data[4];
+                data[0] = 0x02;
+                data[1] = 0;
+                data[2] = 0;
+                data[3] = 0;
+                SDO_writeObject(0x03, 0x2400, 0x01, 4, data);*/
+                PD4C_stateMachine(0x03);
+                active = 1;
+            }
+            break;
+            
+        case 0x03:
+            currentState = closing;
+            if(!active)
+            {
+                /*uint8_t data[4];
+                data[0] = 0x03;
+                data[1] = 0;
+                data[2] = 0;
+                data[3] = 0;
+                SDO_writeObject(0x03, 0x2400, 0x01, 4, data);*/
+                PD4C_stateMachine(0x03);
+                active = 1;
+            }
+            break;
+            
+        case 0x01:
+            currentState = closed;
+            if(active)
+            {
+                /*uint8_t data[4];
+                data[0] = 0x01;
+                data[1] = 0;
+                data[2] = 0;
+                data[3] = 0;
+                SDO_writeObject(0x03, 0x2400, 0x01, 4, data);*/
+                PD4C_stateMachine(0x03);
+                active = 0;
+            }
+            break;
+            
+        case 0x04:
+            PD4C_setup(0x03);
+            break;
+        
+        default:
+            break;
     }
-    else if(masterCommand == 0x03)
-    {
-        currentState = closing;
-        if(!active)
-        {
-            uint8_t data[4];
-            data[0] = 0x03;
-            data[1] = 0;
-            data[2] = 0;
-            data[3] = 0;
-            SDO_writeObject(0x03, 0x2400, 0x01, 4, data);
-            active = 1;
-        }
-    }
-    else if(masterCommand == 0x01)
-    {
-        currentState = closed;
-        if(active)
-        {
-            uint8_t data[4];
-            data[0] = 0x01;
-            data[1] = 0;
-            data[2] = 0;
-            data[3] = 0;
-            SDO_writeObject(0x03, 0x2400, 0x01, 4, data);
-            active = 0;
-        }
-    }
+    masterCommand = 0;
        
        
        
@@ -246,7 +276,8 @@ void PD4C_setup(uint8_t nodeID)
     data[0] = 4;
     SDO_writeObject(nodeID, 0x6060, 0x00, 1, data);     //Set to torque mode
     chThdSleepMilliseconds(3);
-    data[0] = 0x64;
+    data[0] = 0x90;
+    data[1] = 0x01;
     SDO_writeObject(nodeID, 0x6071, 0x00, 2, data);     //Set target torque to 10% (this will increase to 40% when action is called)
     chThdSleepMilliseconds(3);
     data[0] = 0xF4;
@@ -297,8 +328,8 @@ void PD4C_setup(uint8_t nodeID)
     data[1] = 0x00;
     SDO_writeObject(nodeID, 0x608F, 0x02, 4, data);     //1 encoder rev per motor turn  
     chThdSleepMilliseconds(3);
-    data[0] = 0xC0;
-    SDO_writeObject(nodeID, 0x607E, 0x00, 4, data);     //Polartiy
+    //data[0] = 0xC0;
+    //SDO_writeObject(nodeID, 0x607E, 0x00, 4, data);     //Polartiy
 }
 
 void PD4C_stateMachine(uint8_t nodeID)
@@ -310,19 +341,27 @@ void PD4C_stateMachine(uint8_t nodeID)
     data[3] = 0x0;
     SDO_writeObject(nodeID, 0x6040, 0x00, 2, data);
     chThdSleepMilliseconds(3);
+    SDO_readObject(nodeID, 0x6041, 0x00);
+    chThdSleepMilliseconds(3);
     
     data[0] = 0x07;
     SDO_writeObject(nodeID, 0x6040, 0x00, 2, data);
     chThdSleepMilliseconds(3);
-    
-    data[0] = 0x0F;
-    data[1] = 0x01;
-    SDO_writeObject(nodeID, 0x6040, 0x00, 2, data);
+    SDO_readObject(nodeID, 0x6041, 0x00);
     chThdSleepMilliseconds(3);
     
     data[0] = 0x0F;
     data[1] = 0x01;
     SDO_writeObject(nodeID, 0x6040, 0x00, 2, data);
+    chThdSleepMilliseconds(3);
+    SDO_readObject(nodeID, 0x6041, 0x00);
+    chThdSleepMilliseconds(3);
+    
+    data[0] = 0x0F;
+    data[1] = 0x01;
+    SDO_writeObject(nodeID, 0x6040, 0x00, 2, data);
+    chThdSleepMilliseconds(3);
+    SDO_readObject(nodeID, 0x6041, 0x00);
     chThdSleepMilliseconds(3);
     
     data[0] = 0x0F;
