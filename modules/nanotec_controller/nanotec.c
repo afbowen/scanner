@@ -19,16 +19,48 @@ WORKER_THREAD_DECLARE_EXTERN(WT)
 
 static struct worker_thread_listener_task_s rx_listener_task;
 static void nanotec_can_rx_handler(size_t msg_size, const void* buf, void* ctx);
-CANMessage_t motorStatus;
-uint8_t masterCommand;
-uint16_t setpointRPM;
-int16_t velocityActual;
+
+static CANMessage_t motorStatus;
+static uint8_t masterCommand;
+static uint16_t setpointRPM;
+static int16_t velocityActual;
+
+
+//CANopen Variables
+static bool SDO_downloadConfirmed;         //Cleared upon write, set upon write confirmation
+static CANopenError_t SDO_downloadError;   //Populate when error raised
+static uint8_t init_objectCounter;         //Increments for each object written during the init process
+
+#define NUM_PD4_PARAMS (sizeof(PD4E_init_param)/sizeof(PD4E_init_param[0]))
+static const dictionaryObject_t PD4E_init_param[] = {
+    {0x6091, 0x01, 0x04, {0x01, 0x00, 0x00, 0x00}},
+    {0x6091, 0x02, 0x04, {0x01, 0x00, 0x00, 0x00}},
+    {0x6092, 0x01, 0x04, {0x01, 0x00, 0x00, 0x00}},
+    {0x6092, 0x02, 0x04, {0x01, 0x00, 0x00, 0x00}},
+    {0x6060, 0x00, 0x01, {0x04, 0x00, 0x00, 0x00}},
+    {0x6071, 0x00, 0x02, {0x90, 0x01, 0x00, 0x00}},
+    {0x6072, 0x00, 0x02, {0xF4, 0x01, 0x00, 0x00}},
+    {0x6087, 0x00, 0x04, {0xF4, 0x01, 0x00, 0x00}},
+    {0x3202, 0x00, 0x04, {0x01, 0x00, 0x00, 0x00}},
+    {0x604C, 0x01, 0x04, {0x01, 0x00, 0x00, 0x00}},
+    {0x604C, 0x02, 0x04, {0x3C, 0x00, 0x00, 0x00}},
+    {0x6080, 0x00, 0x04, {0x2C, 0x01, 0x00, 0x00}},
+    {0x203B, 0x01, 0x04, {0xA0, 0x0F, 0x00, 0x00}}
+};
+
+
+
 
 RUN_BEFORE(INIT_END) {
     struct can_instance_s* can = can_get_instance(0);
     struct pubsub_topic_s* can_rx_topic = can_get_rx_topic(can);
     if (!can_rx_topic) return;
     worker_thread_add_listener_task(&WT, &rx_listener_task, can_rx_topic, nanotec_can_rx_handler, NULL);
+    
+    SDO_downloadConfirmed = 0; 
+    SDO_downloadError = {0x0000, 0x00, 0x00, {0x00, 0x00, 0x00, 0x00}};
+    init_objectCounter = 0;
+    
 }
 
 static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx) 
@@ -36,6 +68,8 @@ static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx)
     (void) msg_size;
     const struct can_rx_frame_s* frame = msg;
     
+    
+    //Check if it's a command from Particle (11-bit SID = 0x30)
     if((frame->content.IDE == 0) && ((frame->content.SID == 0x30)))
     {
         masterCommand = frame->content.data[0];
@@ -57,22 +91,38 @@ static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx)
         CAN_transmit(rebound);
     }
     
-    //Check if it's a CANopen frame
-    
+    //Check if it's a CANopen SDO reply frame
     else if((frame->content.IDE == 0) && (((frame->content.SID >> 4) & 0xF8) == 0x58))   //If not extended ID and function code is 0x58, this is CANopen message
     {
         CANopenMessage_t msgInCANopen;
-    
-        msgInCANopen.functionCode = ((frame->content.SID >> 4)&0xF8);
-        msgInCANopen.nodeID = (frame->content.SID & 0x7F);
-        msgInCANopen.ide = frame->content.IDE;
-        msgInCANopen.rtr = frame->content.RTR;
+        
+        //Check node ID (we know this is an SDO response, no need to check function code, IDE, RTR)
+        msgInCANopen.nodeID = (frame->content.SID & 0x7F);    
         msgInCANopen.dlc = frame->content.DLC;
     
+        //Unnecessary...but keep for now 
         for(uint8_t i = 0; i < msgInCANopen.dlc; i++)
         {
             msgInCANopen.data[i] = frame->content.data[i];
         }
+        
+        //Check if Download SDO_downloadConfirmed
+        if(msgInCANopen.data[0] == 0x60)
+        {
+            SDO_downloadConfirmed = 1;  //Set download confirm bit
+        }
+        
+        //Check if there's been a download error
+        else if(msgInCANopen.data[0] == 0x80)
+        {
+            SDO_downloadError.errorFlag = 1;  //Set error flag
+            SDO_downloadError.index = ((msgInCANopen.data[2] << 8) | (msgInCANopen.data[1]));
+            SDO_downloadError.subIndex = msgInCANopen.data[3];
+            SDO_downloadError.errorCode = ((msgInCANopen.data[7] << 24) | (msgInCANopen.data[6] << 16) | (msgInCANopen.data[5] << 8) | (msgInCANopen.data[4] << 24));
+        }
+            
+            
+        
         
         if(msgInCANopen.data[1] == 0x44)
         {
@@ -85,16 +135,7 @@ static void nanotec_can_rx_handler(size_t msg_size, const void* msg, void* ctx)
         CANopenTransmit(msgInCANopen);
         
     }
-    /*
-    motorStatus.sid = frame->content.SID;
-    motorStatus.data[0] = frame->content.data[0];
-    motorStatus.data[1] = frame->content.data[1];
-    motorStatus.data[2] = frame->content.data[2];
-    motorStatus.data[3] = frame->content.data[3];
-    motorStatus.data[4] = frame->content.data[4];
-    motorStatus.data[5] = frame->content.data[5];
-    motorStatus.data[6] = frame->content.data[6];
-    motorStatus.data[7] = frame->content.data[7];*/
+
 }
 
 void CAN_transmit(CANMessage_t msgOutCAN)
@@ -130,27 +171,6 @@ void CANopenTransmit(CANopenMessage_t msgOutCANopen)
     CAN_transmit(msgOutCAN);
 }
 
-/*
-CANopenMessage_t CANopenReceive(CANMessage_t msgInCAN)
-{
-    //CANMessage_t msgInCAN;
-    CANopenMessage_t msgInCANopen;
-    
-    msgInCANopen.functionCode = ((frame->content.SID >> 4)&0xF8);
-    msgInCANopen.nodeID = (frame->content.SID & 0x7F);
-    msgInCANopen.ide = frame->content.IDE;
-    msgInCANopen.rtr = frame->content.RTR;
-    msgInCANopen.dlc = frame->content.DLC;
-    
-    for(uint8_t i = 0; i < msgInCANopen.dlc; i++)
-    {
-        msgInCANopen.data[i] = frame->content.data[i];
-    }
-    
-    return msgInCANopen;
-}*/
-
-//CANopenMessage_t nanotec::CANopenReceive()
 
 void SDO_writeObject(uint8_t nodeID, uint16_t index, uint8_t subIndex, uint8_t arraySize, uint8_t data[])
 {
@@ -195,6 +215,50 @@ void SDO_writeObject(uint8_t nodeID, uint16_t index, uint8_t subIndex, uint8_t a
     CANopenTransmit(msgOutCANopen);
 }
 
+void SDO_writeInitParam(uint8_t nodeID, dictionaryObject_t param)
+{
+    CANopenMessage_t msgOutCANopen;
+    msgOutCANopen.functionCode = 0x60;      //0x60 indicates CANopen master is making SDO request; first half of communication object identifier (COB_ID) 
+    msgOutCANopen.nodeID = nodeID;
+    msgOutCANopen.ide = 0;
+    msgOutCANopen.rtr = 0;
+    msgOutCANopen.dlc = 8;
+    
+    switch(param.arraySize)
+    {
+        case 1:
+            msgOutCANopen.data[0] = 0x2F;
+            break;
+        
+        case 2:
+            msgOutCANopen.data[0] = 0x2B;
+            break;
+            
+        case 3:
+            msgOutCANopen.data[0] = 0x27;
+            break;
+            
+        case 4:
+            msgOutCANopen.data[0] = 0x23;
+            break;
+    }
+    
+    msgOutCANopen.data[1] = param.index & 0xFF;   //LSB of index, Little Endian
+    msgOutCANopen.data[2] = param.index >> 8;     //MSB of index
+    msgOutCANopen.data[3] = param.subIndex;
+    
+    //Currently expects 4 bytes...make this conditional
+    msgOutCANopen.data[4] = param.data[0];
+    msgOutCANopen.data[5] = param.data[1];
+    msgOutCANopen.data[6] = param.data[2];
+    msgOutCANopen.data[7] = param.data[3];
+    
+    CANopenTransmit(msgOutCANopen);
+}    
+    
+    
+    
+
     
 void SDO_readObject(uint8_t nodeID, uint16_t index, uint8_t subIndex)
 {
@@ -220,56 +284,17 @@ void SDO_readObject(uint8_t nodeID, uint16_t index, uint8_t subIndex)
     
 
 //DIRECT MOTOR CONTROL
-/*void PD4C_setup(uint8_t nodeID)
-{
-    uint8_t data[4];    //Declare 4-byte data array to be populated for each object
-    data[0] = 1;
-    data[1] = 0;
-    data[2] = 0;
-    data[3] = 0;
-    SDO_writeObject(nodeID, 0x6091, 0x01, 4, data);     //Motor Rev
-    SDO_writeObject(nodeID, 0x6091, 0x02, 4, data);     //Shaft Rev    
-    SDO_writeObject(nodeID, 0x6092, 0x01, 4, data);     //Feed (pitch)
-    SDO_writeObject(nodeID, 0x6092, 0x02, 4, data);     //Drive Axis Revs (to achieve that feed)
+void PD4E_init(uint8_t nodeID) {
+    for (size_t i = 0; i < NUM_PD4_PARAMS; i++) {
+        SDO_writeObject(nodeID, PD4E_init_param[i]);
+        SDO_downloadConfirmed = 0;
+        while (SDO_downloadConfirmed != 1);
+        {
+            //Do nothing...
+        }
+    }
     
-    SDO_writeObject(nodeID, 0x320B, 0x03, 4, data);     //Velocity ACtual (0x6044 sourced from encoder value)
-    
-    data[0] = 4;
-    SDO_writeObject(nodeID, 0x6060, 0x00, 4, data);     //Set to torque mode
-    data[0] = 100;
-    SDO_writeObject(nodeID, 0x6071, 0x00, 4, data);     //Set target torque to 10% (this will increase to 40% when action is called)
-    data[0] = 500;
-    SDO_writeObject(nodeID, 0x6072, 0x00, 4, data);     //Set max torque to 50%
-    data[0] = 100;
-    SDO_writeObject(nodeID, 0x6087, 0x00, 4, data);     //Set torque slop rise to 10%/sec
-    data[0] = 1;
-    SDO_writeObject(nodeID, 0x3202, 0x00, 4, data);     //Set to Closed-Loop mode (0x21 no max velocity)
-    
-    data[0] = 0x12C;
-    SDO_writeObject(nodeID, 0x2032, 0x00, 4, data);     //0x12C - 300rpm (this is subject to ramp up/down)
-    
-    //Velocity Dimensions
-    data[0] = 0x01;
-    SDO_writeObject(nodeID, 0x604C, 0x01, 4, data);     //Numerator - 1 rev
-    data[0] = 0x3C;
-    SDO_writeObject(nodeID, 0x604C, 0x02, 4, data);     //Denominator - 60 sec
-    
-    //Current Parameters
-    data[0] = 0x157C;
-    SDO_writeObject(nodeID, 0x2031, 0x00, 4, data);     //Set maximum current (0x157C - 5500 mA)
-    data[0] = 0x0FA0;
-    SDO_writeObject(nodeID, 0x203B, 0x01, 4, data);     //Set nominal current (0xFA0 - 4000mA)    
-    data[0] = 0x3E8;
-    SDO_writeObject(nodeID, 0x203B, 0x02, 4, data);     //Max duration of peak current (0x3E8 - 1000ms)
-    
-    //General Parameters
-    data[0] = 0x2D0;
-    SDO_writeObject(nodeID, 0x608F, 0x01, 4, data);     //Postion resolution (0x2D0 - 720 steps/rev) 
-    data[0] = 0x01;
-    SDO_writeObject(nodeID, 0x608F, 0x02, 4, data);     //1 encoder rev per motor turn   
-    data[0] = 0xC0;
-    SDO_writeObject(nodeID, 0x607E, 0x00, 4, data);     //Polartiy
-}*/
+}
     
 
 void PD4C_openPetal(uint8_t nodeID)
@@ -305,17 +330,24 @@ void PD4C_closePetal(uint8_t nodeID)
 }
 
     
+/*
+CANopenMessage_t CANopenReceive(CANMessage_t msgInCAN)
+{
+    //CANMessage_t msgInCAN;
+    CANopenMessage_t msgInCANopen;
     
+    msgInCANopen.functionCode = ((frame->content.SID >> 4)&0xF8);
+    msgInCANopen.nodeID = (frame->content.SID & 0x7F);
+    msgInCANopen.ide = frame->content.IDE;
+    msgInCANopen.rtr = frame->content.RTR;
+    msgInCANopen.dlc = frame->content.DLC;
     
+    for(uint8_t i = 0; i < msgInCANopen.dlc; i++)
+    {
+        msgInCANopen.data[i] = frame->content.data[i];
+    }
     
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
-    
+    return msgInCANopen;
+}*/
+
+//CANopenMessage_t nanotec::CANopenReceive(

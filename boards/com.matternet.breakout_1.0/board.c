@@ -19,6 +19,6 @@ void boardInit(void) {
     
     
     palClearLine(BOARD_PAL_LINE_PIN9);      //Init LED off
-    palClearLine(BOARD_PAL_LINE_PIN10);     //Init LED off
+    palSetLine(BOARD_PAL_LINE_PIN10);     //Init LED off
     palSetLine(BOARD_PAL_LINE_PIN3);      //Init beacon on
 }

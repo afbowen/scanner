@@ -43,3 +43,5 @@
 #define CH_DBG_ENABLE_CHECKS                TRUE
 #define CH_DBG_ENABLE_ASSERTS               TRUE
 #define CH_DBG_ENABLE_STACK_CHECK           TRUE
+
+#define HAL_USE_PWM                         TRUE

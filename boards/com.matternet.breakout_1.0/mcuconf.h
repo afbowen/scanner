@@ -52,6 +52,8 @@
 #define STM32_ST_IRQ_PRIORITY               8
 #define STM32_ST_USE_TIMER                  2
 
+#define STM32_PWM_USE_TIM1                  TRUE 
+
 /*
  * EXT driver system settings.
  */

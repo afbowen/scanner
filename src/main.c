@@ -122,12 +122,12 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
                 uint8_t data[4];
                 data[2] = 0;
                 data[3] = 0;
-                data[0] = 0x90;//64
-                data[1] = 0x01;//0
+                data[0] = 0x90;
+                data[1] = 0x01;
                 SDO_writeObject(0x03, 0x6071, 0x00, 2, data);     //Set target torque to 10% (this will increase to 40% when action is called)
                 chThdSleepMilliseconds(3);
-                data[0] = 0xF4;//F4
-                data[1] = 0x01;//01
+                data[0] = 0xF4;
+                data[1] = 0x01;
                 SDO_writeObject(0x03, 0x6072, 0x00, 2, data);     //Set max torque to 50%
                 data[1] = 0x00;
                 chThdSleepMilliseconds(3);
@@ -171,7 +171,7 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
             break;
             
         case 0x04:
-            PD4C_setup(0x03);
+            PD4C_init(0x03);
             break;
             
         case 0x05:
@@ -242,7 +242,6 @@ static void my_task_func(struct worker_thread_timer_task_s* task)
         beaconOn = !beaconOn;
         palClearLine(BOARD_PAL_LINE_PIN3);
     }
-
     */
 }
 
@@ -400,7 +399,4 @@ void PD4C_stateMachine(uint8_t nodeID)
     //SDO_writeObject(nodeID, 0x2400, 0x01, 4, data);
     
 }
-    
-    
-    
     
